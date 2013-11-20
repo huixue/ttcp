@@ -727,6 +727,7 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
 };
 
+#include "hx_debug.h"
 
 static int net_client_init1(const void *object, int is_netdev, Error **errp)
 {
@@ -780,6 +781,9 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
             peer = net_hub_add_port(u.net->has_vlan ? u.net->vlan : 0, NULL);
         }
 
+        if (opts->kind == NET_CLIENT_OPTIONS_KIND_USER)
+            hxdbg("calling init for NET_CLIENT_OPTIONS_KIND_USER\n");
+
         if (net_client_init_fun[opts->kind](opts, name, peer) < 0) {
             /* TODO push error reporting into init() methods */
             error_set(errp, QERR_DEVICE_INIT_FAILED,
@@ -803,6 +807,7 @@ static void net_visit(Visitor *v, int is_netdev, void **object, Error **errp)
 
 int net_client_init(QemuOpts *opts, int is_netdev, Error **errp)
 {
+    hxdbg("%s %s is_netdev: %d\n", __FILE__, __FUNCTION__, is_netdev);
     void *object = NULL;
     Error *err = NULL;
     int ret = -1;

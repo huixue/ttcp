@@ -99,8 +99,259 @@ static void slirp_smb_cleanup(SlirpState *s);
 static inline void slirp_smb_cleanup(SlirpState *s) { }
 #endif
 
+#define INBOUND_MSG "\nPACKET_I:"
+#define OUTBOUND_MSG "\nPACKET_O:"
+
+#include "hx_libstack.h"
+
+struct eth_hdr get_eth_hdr(const uint8_t *pkt, int len) {
+    struct eth_hdr hdr;
+    memcpy(&hdr, pkt, sizeof(struct eth_hdr));
+    hdr.type = ntohs(hdr.type);
+    return hdr;
+}
+struct arp_pkt get_arp_pkt(const uint8_t *arp_pkt_data, int len) {
+    struct arp_pkt pkt;
+    memcpy(&pkt, arp_pkt_data, sizeof(struct arp_pkt));
+    return pkt;
+}
+void log_eth_hdr(struct eth_hdr hdr, FILE *fout) {
+    fprintf(fout, "ETHER HEADER:\n");
+    fprintf(fout, "dmac: 0x%02x:%02x:%02x:%02x:%02x:%02x\n", 
+            hdr.dmac[0], hdr.dmac[1], hdr.dmac[2],
+            hdr.dmac[3], hdr.dmac[4], hdr.dmac[5]);
+    fprintf(fout, "smac: 0x%02x:%02x:%02x:%02x:%02x:%02x\n", 
+            hdr.smac[0], hdr.smac[1], hdr.smac[2], 
+            hdr.smac[3], hdr.smac[4], hdr.smac[5]);
+    fprintf(fout, "frame type: 0x%04x\n", hdr.type);
+}
+void log_arp(struct arp_pkt pkt, FILE* fout) {
+    fprintf(fout, "\tARP htype: 0x%02x%02x\n", pkt.htype[0], pkt.htype[1]);
+    fprintf(fout, "\tARP ptype: 0x%02x%02x\n", pkt.ptype[0], pkt.ptype[1]);
+    fprintf(fout, "\tARP hlen:  0x%02x    plen: %#04x\n", pkt.hlen, pkt.plen);
+    fprintf(fout, "\tARP oper:  0x%02x%02x\n", pkt.oper[0], pkt.oper[1]);
+    fprintf(fout, "\tARP smac:  0x%02x:%02x:%02x:%02x:%02x:%02x\n", 
+            pkt.smac[0], pkt.smac[1], pkt.smac[2], 
+            pkt.smac[3], pkt.smac[4], pkt.smac[5]);
+    fprintf(fout, "\tARP sip:   %3d.%3d.%3d.%3d\n",
+            pkt.sip[0], pkt.sip[1], pkt.sip[2], pkt.sip[3]);
+    fprintf(fout, "\tARP dmac:  0x%02x:%02x:%02x:%02x:%02x:%02x\n", 
+            pkt.dmac[0], pkt.dmac[1], pkt.dmac[2], 
+            pkt.dmac[3], pkt.dmac[4], pkt.dmac[5]);
+    fprintf(fout, "\tARP dip:   %3d.%3d.%3d.%3d\n",
+            pkt.dip[0], pkt.dip[1], pkt.dip[2], pkt.dip[3]);    
+}
+
+#define IP_GET_VERSION(hdr) (uint8_t) (hdr.version_ihl >> 4)
+#define IP_GET_IHL(hdr) (uint8_t) (hdr.version_ihl & 0x0f)
+#define IP_GET_DSCP(hdr) (uint8_t) (hdr.dscp_ecn >> 2)
+#define IP_GET_ECN(hdr) (uint8_t) (hdr.dscp_ecn & 0x03)
+#define IP_GET_FLAGS(hdr) (uint8_t) (hdr.flags_fragoffset >> 13)
+#define IP_GET_FRAGOFFSET(hdr) (uint16_t) (hdr.flags_fragoffset & 0x1fff)
+
+struct ip_hdr get_ip_hdr(const uint8_t *ip_pkt_data, int len) {
+    struct ip_hdr hdr;
+    memcpy(&hdr, ip_pkt_data, sizeof(struct ip_hdr));
+    hdr.length = ntohs(hdr.length);
+    hdr.id = ntohs(hdr.id);
+    hdr.flags_fragoffset = ntohs(hdr.flags_fragoffset);
+    hdr.checksum = ntohs(hdr.checksum);
+    hdr.options = ntohl(hdr.options);
+    return hdr;
+}
+
+void log_ip_hdr_raw(const uint8_t *pkg_data, FILE *fout) {
+    fprintf(fout, "\tIP HEADER RAW: ");
+    for (int i = 0; i < 20; i++) {
+        if (i % 4 == 0)
+            fprintf(fout, "\n\t");
+        if (i % 4 == 2)
+            fprintf(fout, " ");
+        fprintf(fout, "%02x", *(pkg_data + i));
+    }
+    fprintf(fout, "\n");
+}
+
+void log_ip_hdr(struct ip_hdr hdr, FILE *fout) {
+    fprintf(fout, "\tIP version:  0x%01x\n", IP_GET_VERSION(hdr));
+    fprintf(fout, "\tIP ihl:      0x%01x\n", IP_GET_IHL(hdr));
+    fprintf(fout, "\tIP dscp:     0x%02x\n", IP_GET_DSCP(hdr));
+    fprintf(fout, "\tIP ecn:      0x%1x\n", IP_GET_ECN(hdr));
+    fprintf(fout, "\tIP length:   0x%04x\n", hdr.length);
+    fprintf(fout, "\tIP id:       0x%04x\n", hdr.id);
+    fprintf(fout, "\tIP flags:    0x%1x\n", IP_GET_FLAGS(hdr));
+    fprintf(fout, "\tIP fragoff:  0x%04x\n", IP_GET_FRAGOFFSET(hdr));
+    fprintf(fout, "\tIP ttl:      0x%02x\n", hdr.ttl);
+    fprintf(fout, "\tIP protocol: 0x%02x\n", hdr.protocol);
+    fprintf(fout, "\tIP checksum: 0x%04x\n", hdr.checksum);
+    fprintf(fout, "\tIP sip:      %3d.%3d.%3d.%3d\n",
+            hdr.sip[0], hdr.sip[1], hdr.sip[2], hdr.sip[3]);
+    fprintf(fout, "\tIP dip:      %3d.%3d.%3d.%3d\n",
+            hdr.dip[0], hdr.dip[1], hdr.dip[2], hdr.dip[3]);
+    if (IP_GET_IHL(hdr) > 5)
+        fprintf(fout, "\tIP options:  0x%8x\n", hdr.options);
+}
+
+struct icmp_hdr get_icmp_hdr(const uint8_t *pkt_data, int len) {
+    struct icmp_hdr hdr;
+    memcpy(&hdr, pkt_data, sizeof(struct icmp_hdr));
+    hdr.checksum = ntohs(hdr.checksum);
+    hdr.rest = ntohl(hdr.rest);
+    return hdr;
+}
+
+void log_icmp_hdr(struct icmp_hdr hdr, FILE *fout) {
+    fprintf(fout, "\t\tICMP type:       0x%02x\n", hdr.type);
+    fprintf(fout, "\t\tICMP code:       0x%02x\n", hdr.code);
+    fprintf(fout, "\t\tICMP checksum:   0x%04x\n", hdr.checksum);
+    fprintf(fout, "\t\tICMP rest:       0x%08x\n", hdr.rest);
+}
+
+struct udp_hdr get_udp_hdr(const uint8_t *pkt_data, int len) {
+    struct udp_hdr hdr;
+    memcpy(&hdr, pkt_data, sizeof(struct udp_hdr));
+    hdr.sport = ntohs(hdr.sport);
+    hdr.dport = ntohs(hdr.dport);
+    hdr.length = ntohs(hdr.length);
+    hdr.checksum = ntohs(hdr.checksum);
+    return hdr;
+}
+
+void log_udp_hdr(struct udp_hdr hdr, FILE *fout) {
+    fprintf(fout, "\t\tUDP sport:    0x%04x\n", hdr.sport);
+    fprintf(fout, "\t\tUDP dport:    0x%04x\n", hdr.dport);
+    fprintf(fout, "\t\tUDP length:   0x%04x\n", hdr.length);
+    fprintf(fout, "\t\tUDP checksum: 0x%04x\n", hdr.checksum);
+}
+
+#define _GET_TCP_DATA_OFFSET(hdr) (uint8_t) (hdr.meta >> 12)
+#define GET_TCP_DATA_OFFSET(hdr) (uint8_t) (hdr.m.meta >> 12)
+#define GET_TCP_RESERVED(hdr) (uint8_t) ((hdr.m.meta >> 9) & 0x07)
+#define GET_TCP_NS(hdr) (uint8_t) ((hdr.m.meta >> 8) & 0x01)
+#define GET_TCP_CWR(hdr) (uint8_t) ((hdr.m.meta >> 7) & 0x01)
+#define GET_TCP_ECE(hdr) (uint8_t) ((hdr.m.meta >> 6) & 0x01)
+#define GET_TCP_URG(hdr) (uint8_t) ((hdr.m.meta >> 5) & 0x01)
+#define GET_TCP_ACK(hdr) (uint8_t) ((hdr.m.meta >> 4) & 0x01)
+#define GET_TCP_PSH(hdr) (uint8_t) ((hdr.m.meta >> 3) & 0x01)
+#define GET_TCP_RST(hdr) (uint8_t) ((hdr.m.meta >> 2) & 0x01)
+#define GET_TCP_SYN(hdr) (uint8_t) ((hdr.m.meta >> 1) & 0x01)
+#define GET_TCP_FIN(hdr) (uint8_t) (hdr.m.meta & 0x01)
+
+struct tcp_hdr get_tcp_hdr(const uint8_t *pkt_data, int len) {
+    struct tcp_mandatory man_hdr;
+    memcpy(&man_hdr, pkt_data, sizeof(struct tcp_mandatory));
+    man_hdr.sport = ntohs(man_hdr.sport);
+    man_hdr.dport = ntohs(man_hdr.dport);
+    man_hdr.seq = ntohl(man_hdr.seq);
+    man_hdr.ack = ntohl(man_hdr.ack);
+    man_hdr.meta = ntohs(man_hdr.meta);
+    man_hdr.winsz = ntohs(man_hdr.winsz);
+    man_hdr.checksum = ntohs(man_hdr.checksum);
+    man_hdr.urgptr = ntohs(man_hdr.urgptr);
+    struct tcp_hdr hdr;
+    hdr.m = man_hdr;
+    uint8_t data_offset = _GET_TCP_DATA_OFFSET(man_hdr);
+    if (data_offset > 5) {
+        memcpy(&hdr.options, pkt_data + 5 * 4, (data_offset - 5) * 4);
+        for (int i = 0; i < 10; i++)
+            hdr.options[i] = ntohl(hdr.options[i]);
+    }
+    return hdr;
+}
+
+void log_tcp_hdr_raw(const uint8_t *pkt_data, FILE *fout) {
+    fprintf(fout, "\t\tTCP WHOLE HEADER:");
+    for (int i = 0; i < 20; i++) {
+        if (i % 4 == 0)
+            fprintf(fout, "\n\t\t");
+        if (i % 4 == 2)
+            fprintf(fout, " ");
+        fprintf(fout, "%02x", *(pkt_data + i));
+    }
+    fprintf(fout, "\n");
+}
+
+void log_tcp_hdr(struct tcp_hdr hdr, FILE *fout) {
+    fprintf(fout, "\t\tTCP sport:    0x%02x\n", hdr.m.sport);
+    fprintf(fout, "\t\tTCP dport:    0x%02x\n", hdr.m.dport);
+    fprintf(fout, "\t\tTCP seq:      0x%04x\n", hdr.m.seq);
+    fprintf(fout, "\t\tTCP ack:      0x%04x\n", hdr.m.ack);
+    fprintf(fout, "\t\tTCP offset:   0x%01x\n", GET_TCP_DATA_OFFSET(hdr));
+    fprintf(fout, "\t\tTCP reserved: 0x%01x\n", GET_TCP_RESERVED(hdr));
+    fprintf(fout, "\t\tTCP NS:       0x%01x\n", GET_TCP_NS(hdr));
+    fprintf(fout, "\t\tTCP CWR:      0x%01x\n", GET_TCP_CWR(hdr));
+    fprintf(fout, "\t\tTCP ECE:      0x%01x\n", GET_TCP_ECE(hdr));
+    fprintf(fout, "\t\tTCP URG:      0x%01x\n", GET_TCP_URG(hdr));
+    fprintf(fout, "\t\tTCP ACK:      0x%01x\n", GET_TCP_ACK(hdr));
+    fprintf(fout, "\t\tTCP PSH:      0x%01x\n", GET_TCP_PSH(hdr));
+    fprintf(fout, "\t\tTCP RST:      0x%01x\n", GET_TCP_RST(hdr));
+    fprintf(fout, "\t\tTCP SYN:      0x%01x\n", GET_TCP_SYN(hdr));
+    fprintf(fout, "\t\tTCP FIN:      0x%01x\n", GET_TCP_FIN(hdr));
+}
+
+void log_frame_info(const uint8_t *pkt, int len, int inbound, FILE *fout) {
+    struct eth_hdr hdr = get_eth_hdr(pkt, len);
+    int offset = 0;
+    log_eth_hdr(hdr, fout);
+    if (hdr.type == 0x0806) {
+        offset = sizeof(struct eth_hdr);
+        struct arp_pkt pkt_arp = get_arp_pkt(pkt + offset, len - offset);
+        log_arp(pkt_arp, fout);
+    }
+    if (hdr.type == 0x0800) {
+        offset = sizeof(struct eth_hdr);
+        struct ip_hdr hdr_ip = get_ip_hdr(pkt + offset, len - offset);
+        log_ip_hdr_raw(pkt + offset, fout);
+        log_ip_hdr(hdr_ip, fout);
+
+
+        offset = sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
+        if (IP_GET_IHL(hdr_ip) <= 5) {
+            //when IHL <= 5, there's no options in IP header
+            offset -= sizeof(uint32_t);
+        }
+        if (hdr_ip.protocol == 0x1) {
+            struct icmp_hdr hdr_icmp = get_icmp_hdr(pkt + offset, len - offset);
+            log_icmp_hdr(hdr_icmp, fout);
+        }
+        if (hdr_ip.protocol == 0x11) {
+            struct udp_hdr hdr_udp = get_udp_hdr(pkt + offset, len - offset);
+            log_udp_hdr(hdr_udp, fout);
+        }
+        if (hdr_ip.protocol == 0x6) {
+            struct tcp_hdr hdr_tcp = get_tcp_hdr(pkt + offset, len - offset);
+            log_tcp_hdr_raw(pkt + offset, fout);
+            log_tcp_hdr(hdr_tcp, fout);
+        }
+    }
+}
+
+void hx_dump_frame(const uint8_t *pkt, int pkt_len, int inbound) {
+
+    FILE *f = fopen("/tmp/pkg.dat", "a+");
+    if (inbound) {
+        fwrite(INBOUND_MSG, strlen(INBOUND_MSG), 1, f);
+    } else {
+        fwrite(OUTBOUND_MSG, strlen(OUTBOUND_MSG), 1, f);
+    }
+    
+    char buf[256];
+    sprintf(buf, ":%d:\n", pkt_len);
+    fwrite(buf, strlen(buf), 1, f);
+    fwrite(pkt, pkt_len, 1, f);
+    
+    fclose(f);
+        
+    FILE * f1 = fopen("/tmp/pkg2.dat", "a+");
+    log_frame_info(pkt, pkt_len, inbound, f1);
+    
+    fclose(f1);
+    
+}
+
 void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 {
+	hx_dump_frame(pkt, pkt_len, 1);
     SlirpState *s = opaque;
 
     qemu_send_packet(&s->nc, pkt, pkt_len);
@@ -131,6 +382,8 @@ static NetClientInfo net_slirp_info = {
     .cleanup = net_slirp_cleanup,
 };
 
+#include "hx_debug.h"
+
 static int net_slirp_init(NetClientState *peer, const char *model,
                           const char *name, int restricted,
                           const char *vnetwork, const char *vhost,
@@ -139,6 +392,7 @@ static int net_slirp_init(NetClientState *peer, const char *model,
                           const char *vnameserver, const char *smb_export,
                           const char *vsmbserver, const char **dnssearch)
 {
+    hxdbg("%s %s", __FILE__, __FUNCTION__);
     /* default settings according to historic slirp */
     struct in_addr net  = { .s_addr = htonl(0x0a000200) }; /* 10.0.2.0 */
     struct in_addr mask = { .s_addr = htonl(0xffffff00) }; /* 255.255.255.0 */
@@ -726,9 +980,12 @@ static const char **slirp_dnssearch(const StringList *dnsname)
     return ret;
 }
 
+#include "hx_debug.h"
+
 int net_init_slirp(const NetClientOptions *opts, const char *name,
                    NetClientState *peer)
 {
+    hxdbg("%s %s\n", __FILE__,  __FUNCTION__);
     struct slirp_config_str *config;
     char *vnet;
     int ret;

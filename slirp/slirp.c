@@ -203,6 +203,7 @@ Slirp *slirp_init(int restricted, struct in_addr vnetwork,
                   struct in_addr vnameserver, const char **vdnssearch,
                   void *opaque)
 {
+    printf("00000000000000000");
     Slirp *slirp = g_malloc0(sizeof(Slirp));
 
     slirp_init_once();
@@ -707,6 +708,8 @@ static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 
 void slirp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 {
+    printf("hahahahhahahaha");
+    hx_dump_frame(pkt, pkt_len, 0);
     struct mbuf *m;
     int proto;
 
